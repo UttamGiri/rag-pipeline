@@ -61,6 +61,7 @@ PDF (S3)
 - Hashes raw text using SHA-256 for deduplication
 - Generates embeddings using Cohere `embed-english-v2` via Bedrock
 - Indexes redacted chunks and vectors into OpenSearch with KNN support
+- Rich metadata support for enterprise/federal deployments (RBAC, ABAC, compliance)
 
 **Technology Stack**:
 - Python 3.11
@@ -74,12 +75,22 @@ PDF (S3)
 - Environment-aware: `env/.env.dev`, `env/.env.staging`, `env/.env.prod`
 - Configurable chunk sizes and breakpoint thresholds
 - Docker-based deployment
+- Rich metadata fields for access control and compliance
+
+**Admin Tools** (`data-ingestion/admin/`):
+- `delete_chunks.py` - Delete chunks for a specific document
+- `reingest_document.py` - Delete and re-ingest a document
+- Supports in-place updates for production indexes
+- See [`data-ingestion/admin/README.md`](data-ingestion/admin/README.md) for details
 
 **Testing**:
 - Unit tests for all components
 - Integration tests for end-to-end pipeline
 
-**Documentation**: See [`data-ingestion/README.md`](data-ingestion/README.md)
+**Documentation**: 
+- See [`data-ingestion/README.md`](data-ingestion/README.md)
+- See [`data-ingestion/METADATA.md`](data-ingestion/METADATA.md) for metadata schema
+- See [`data-ingestion/admin/README.md`](data-ingestion/admin/README.md) for admin tools
 
 ---
 
@@ -190,8 +201,13 @@ PDF (S3)
 rag-pipeline/
 ├── data-ingestion/          # Document processing and indexing service
 │   ├── src/                # Source code
+│   ├── admin/              # Admin tools for document updates
+│   │   ├── delete_chunks.py
+│   │   ├── reingest_document.py
+│   │   └── README.md
 │   ├── tests/              # Unit and integration tests
 │   ├── env/                # Environment configurations
+│   ├── METADATA.md         # Metadata schema documentation
 │   └── Dockerfile          # Container definition
 ├── rag-api/                # Query API service
 │   ├── src/                # Source code
@@ -202,6 +218,56 @@ rag-pipeline/
     ├── test_*.py          # Integration test files
     └── conftest.py        # Test fixtures
 ```
+
+## Production Index Management
+
+### In-Place Updates (Small Changes)
+
+For normal day-to-day operations:
+- **New PDFs** coming in
+- **A few PDFs** updated
+- **Background ingestion**
+- **Incremental changes**
+
+**Approach**: Write directly into the live production index (`prod_v1`)
+
+- OpenSearch is built for continuous indexing + searching
+- **No downtime** when adding/updating docs
+- Users keep searching normally during updates
+- Brief 1-2 second window where updated doc might not show up (acceptable)
+
+**Use admin scripts** (`data-ingestion/admin/`) for single document updates:
+```bash
+python admin/reingest_document.py reingest --bucket mybucket --key path/doc.pdf
+```
+
+### Blue-Green Index (Large Changes)
+
+For breaking changes or full rebuilds:
+- **New embedding model** (dimension changes)
+- **Index mapping changes**
+- **Major chunking redesign**
+- **Full corpus rebuild**
+
+**Approach**: Create new index (`prod_v2`) with alias switching
+
+1. Create `prod_v2` alongside `prod_v1`
+2. Ingest all data into `prod_v2` in background
+3. Test against `prod_v2`
+4. Atomically flip alias (`rag_current`) from `prod_v1` → `prod_v2`
+5. Users never see half-baked results
+
+**Decision Matrix**:
+
+| Scenario | Approach | Index | Downtime |
+|----------|----------|-------|----------|
+| Update 1-10 PDFs | In-place | `prod_v1` | None |
+| New PDFs (incremental) | In-place | `prod_v1` | None |
+| Change embedding model | Blue-green | `prod_v2` + alias | None |
+| Change index mapping | Blue-green | `prod_v2` + alias | None |
+| Full corpus rebuild | Blue-green | `prod_v2` + alias | None |
+
+See [`data-ingestion/admin/README.md`](data-ingestion/admin/README.md) for detailed production index management guidance.
 
 ## Security & Compliance
 
