@@ -32,33 +32,46 @@ The RAG pipeline consists of three main components:
 
 ### End-to-End Architecture
 
-The pipeline has two coordinated paths:
+The pipeline has three coordinated paths:
 
-- **Ingestion path**: pull a Confluence page by `page_id`, clean/chunk/redact/embed, and index into OpenSearch.
+- **Event intake path**: Confluence webhook events are durably stored, deduplicated, and dispatched every 15 minutes.
+- **Ingestion path**: for each deduped `page_id`, fetch latest page, archive raw record to S3, hash/chunk/redact/embed, then upsert into OpenSearch.
 - **Query path**: accept user query + `session_id`, retrieve context from OpenSearch, and answer with Claude.
 
 ```mermaid
-flowchart LR
-    subgraph Ingestion
-        I1[Confluence page_id] --> I2[Fetch page via Confluence REST API]
-        I2 --> I3[Extract text from storage HTML]
-        I3 --> I4[Semantic chunking]
-        I4 --> I5[PII/PHI redaction]
-        I5 --> I6[Embedding generation]
-        I6 --> I7[Index chunks in OpenSearch]
-        I7 --> I8[Upsert document metadata]
-    end
+flowchart TD
+    %% ---------- Event Intake ----------
+    CW[Confluence Webhook: page changed] --> WH[Webhook Receiver]
+    WH --> ES[(Event Store Table)]
+    ES --> DQ[Dispatcher Cron Every 15 min]
+    DQ --> DD[Deduplicate by page_id and keep latest event]
 
-    subgraph Query
-        Q1[POST /query with session_id] --> Q2[Load Redis chat history]
-        Q2 --> Q3[Build prompt with summary + recent turns]
-        Q3 --> Q4[Embed query]
-        Q4 --> Q5[Vector retrieval from OpenSearch]
-        Q5 --> Q6[Claude answer generation]
-        Q6 --> Q7[Persist chat turn]
-    end
+    %% ---------- Ingestion ----------
+    DD --> P1[Fetch latest page from Confluence API]
+    P1 --> P2[Archive raw page payload to S3]
+    P2 --> P3[Extract text and compute document_hash]
+    P3 --> P4{Hash changed vs metadata?}
+    P4 -- No --> P5[Skip re-index]
+    P4 -- Yes --> P6[Semantic chunking]
+    P6 --> P7[PII/PHI redaction]
+    P7 --> P8[Generate embeddings]
+    P8 --> P9[Delete old chunks by document_id]
+    P9 --> P10[Index new chunks/vectors in OpenSearch]
+    P10 --> P11[Upsert document metadata hash lineage]
+    P5 --> PM[Mark event rows as dispatched]
+    P11 --> PM
 
-    I7 -. searchable corpus .-> Q5
+    %% ---------- Query ----------
+    U[User] --> Q1[POST /query]
+    Q1 --> Q2[Load Redis chat history optional]
+    Q2 --> Q3[Embed query]
+    Q3 --> Q4[Vector retrieval from OpenSearch]
+    Q4 --> Q5[Claude answer generation]
+    Q5 --> Q6[Persist chat turn]
+    Q5 --> QR[Return answer plus sources]
+
+    %% ---------- Shared data plane ----------
+    P10 -. searchable corpus .-> Q4
 ```
 
 ### Incremental Ingestion Logic
@@ -75,6 +88,17 @@ flowchart TD
     F --> G[Re-index chunks + vectors]
     G --> H[Upsert metadata with new hash]
 ```
+
+### Event-Driven Ingestion Cadence
+
+For large organizations with high Confluence change volume, ingestion is intentionally staged:
+
+- Webhook events are appended to an event table (durable and replayable).
+- Dispatcher runs every 15 minutes to collapse bursts into one ingestion per `page_id`.
+- Raw fetched page payload is archived to S3 before hash/index steps.
+- Existing hash-based incremental logic prevents unnecessary re-embedding/re-indexing.
+
+This pattern keeps Confluence/API load predictable while preserving auditability and recovery.
 
 ### Data Stores and Responsibilities
 
