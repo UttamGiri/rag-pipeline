@@ -13,3 +13,8 @@ def test_should_reindex_when_hash_changed():
 def test_should_not_reindex_when_hash_matches():
     existing = {"document_hash": "same-hash"}
     assert should_reindex(existing, "same-hash") is False
+
+
+def test_should_reindex_when_metadata_missing_hash():
+    existing = {"document_id": "doc-1"}
+    assert should_reindex(existing, "new-hash") is True

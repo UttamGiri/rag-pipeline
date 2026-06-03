@@ -63,6 +63,53 @@ erDiagram
     }
 ```
 
+### Production-safe Confluence Event Ingestion (15-minute dispatcher)
+
+For large organizations, webhook spikes are expected. This service supports a durable event-store pattern with deterministic dedupe and a debounce window:
+
+- Every webhook event is stored in a local SQLite event table (`confluence_events`).
+- Exact retries are deduplicated by `event_hash`.
+- A dispatcher runs every 15 minutes (configurable), groups by `page_id`, and ingests each page once.
+- Workers remain idempotent via existing `document_hash` checks (no-op if content unchanged).
+
+Mermaid flow:
+
+```mermaid
+flowchart TD
+    A[Confluence Webhook Event] --> B[Persist in confluence_events table]
+    B --> C{Duplicate event_hash?}
+    C -- Yes --> D[Skip insert]
+    C -- No --> E[Pending event row]
+    E --> F[15-minute Dispatcher]
+    F --> G[Select undispatched rows older than debounce]
+    G --> H[Group by page_id and keep latest event id]
+    H --> I[Process one ingest per page_id]
+    I --> J[Ingestion pipeline fetches latest page]
+    J --> J1[Archive raw page to S3]
+    J1 --> K[Compute document_hash from latest page text]
+    K --> L{document_hash changed?}
+    L -- No --> M[Skip re-index]
+    L -- Yes --> N[Delete old chunks and index new chunks]
+    M --> O[Mark grouped rows dispatched]
+    N --> O
+```
+
+Data model:
+
+```mermaid
+erDiagram
+    CONFLUENCE_EVENTS {
+      int id PK
+      string page_id
+      string event_type
+      date event_ts
+      date received_at
+      string event_hash UK
+      string payload_json
+      date dispatched_at
+    }
+```
+
 ### Key Components
 
 **Semantic Chunking**: Uses Cohere Bedrock embeddings (`embed-english-v2`) with LangChain's `SemanticChunker` to intelligently split documents into semantically meaningful chunks. The chunking process considers:
@@ -114,6 +161,13 @@ The service supports multiple environments (dev, staging, prod) through separate
 - `MAX_CHUNK_SIZE`: Maximum chunk size in characters (default: 1000)
 - `MIN_CHUNK_SIZE`: Minimum chunk size in characters (default: 200)
 - `BREAKPOINT_THRESHOLD_TYPE`: Chunking threshold type (default: `percentile`)
+- `CONFLUENCE_EVENT_DB_PATH`: SQLite path for event store (default: `data/confluence_events.db`)
+- `CONFLUENCE_WEBHOOK_HOST`: webhook server bind host (default: `0.0.0.0`)
+- `CONFLUENCE_WEBHOOK_PORT`: webhook server bind port (default: `8081`)
+- `CONFLUENCE_WEBHOOK_TOKEN`: optional shared token for webhook auth
+- `RAW_ARCHIVE_S3_BUCKET`: S3 bucket for raw Confluence page archive (optional, recommended)
+- `RAW_ARCHIVE_S3_PREFIX`: S3 prefix for raw archive objects (default: `confluence/raw`)
+- `RAW_ARCHIVE_S3_SSE`: S3 server-side encryption mode (default: `AES256`)
 
 **Metadata Fields (Required for Enterprise/Federal Deployments):**
 - `DEPARTMENT`: Organizational department (required) - e.g., `Engineering`, `Finance`, `HR`
@@ -148,6 +202,58 @@ export ENVIRONMENT=dev
 
 # Run pipeline
 python -m src.pipelines.ingestion_pipeline
+```
+
+### Running Event Store Workflow
+
+```bash
+# 1) Add an event (simulates webhook receiver behavior)
+python -m admin.confluence_events add \
+  --page-id 123456 \
+  --event-type page_updated \
+  --event-ts 2026-06-02T20:00:00Z
+
+# 2) Dispatch deduped pages every 15 minutes (run from cron/scheduler)
+python -m admin.confluence_events dispatch --interval-minutes 15 --max-pages 200
+```
+
+### Running a Confluence Webhook Receiver
+
+```bash
+# Start local webhook receiver (stores events into confluence_events table)
+ENVIRONMENT=dev python -m admin.confluence_webhook_server
+```
+
+Endpoints:
+
+- `GET /health` -> receiver health check
+- `POST /webhooks/confluence` -> store one Confluence webhook payload
+
+Optional auth:
+
+- Set `CONFLUENCE_WEBHOOK_TOKEN` and send either:
+  - `X-Webhook-Token: <token>`, or
+  - `Authorization: Bearer <token>`
+
+Sample webhook test:
+
+```bash
+curl -X POST "http://localhost:8081/webhooks/confluence" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "webhookEvent":"page_updated",
+    "timestamp":"2026-06-02T20:00:00Z",
+    "page":{"id":"123456"}
+  }'
+```
+
+When `RAW_ARCHIVE_S3_BUCKET` is configured, each dispatched page ingestion archives the fetched raw record to S3 before hash comparison and indexing. This provides replay/audit support while still deduplicating execution by `page_id` every dispatch cycle.
+
+Scheduler example:
+
+```bash
+# Every 15 minutes
+*/15 * * * * cd /path/to/data-ingestion && ENVIRONMENT=prod python -m admin.confluence_events dispatch --interval-minutes 15 --max-pages 200
 ```
 
 ### Docker Deployment

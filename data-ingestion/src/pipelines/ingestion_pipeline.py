@@ -8,6 +8,7 @@ from src.hashing.hash_utils import sha256_hash
 from src.embeddings.cohere_bedrock_embeddings import CohereBedrockEmbedder
 from src.vectorstore.opensearch_client import OpenSearchVectorStore
 from src.pipelines.incremental_utils import should_reindex
+from src.pipelines.raw_archive import archive_confluence_page_raw
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -74,22 +75,15 @@ def _build_metadata():
     
     return meta
 
-def run_pipeline():
-    # Load environment variables
-    env = os.getenv("ENVIRONMENT", "dev")
-    env_file = f"env/.env.{env}"
-    if os.path.exists(env_file):
-        load_dotenv(env_file)
-    else:
-        load_dotenv()  # Fallback to default .env if exists
-    
-    page_id = os.getenv("CONFLUENCE_PAGE_ID")
-    
-    if not page_id:
-        raise ValueError("CONFLUENCE_PAGE_ID must be set")
 
+def ingest_page(page_id: str, event_context: dict | None = None):
     logger.info(f"Starting ingestion for Confluence page_id={page_id}")
     page = read_confluence_page(page_id)
+    s3_bucket, s3_key = archive_confluence_page_raw(
+        page_id=page_id,
+        page=page,
+        event_context=event_context,
+    )
     text = page["text"]
     document_hash = sha256_hash(text)
 
@@ -119,10 +113,14 @@ def run_pipeline():
 
     # Build metadata
     meta = _build_metadata()
+    meta["confluence_page_id"] = page_id
     meta["title"] = meta.get("title") or page.get("title", "")
     meta["source_url"] = meta.get("source_url") or page.get("url", "")
     meta["document_hash"] = document_hash
-    
+    if s3_bucket and s3_key:
+        meta["s3_bucket"] = s3_bucket
+        meta["s3_key"] = s3_key
+
     # Create chunk metadata (chunk_index for each chunk)
     chunk_metadata_list = [
         {"chunk_index": idx}
@@ -148,7 +146,7 @@ def run_pipeline():
             f"Document hash changed for {meta['document_id']}. "
             f"Deleted {deleted} old chunks before re-index."
         )
-    
+
     chunk_ids = os_client.index_docs(
         chunks=redacted,
         vectors=vectors,
@@ -164,6 +162,8 @@ def run_pipeline():
         "document_hash": document_hash,
         "confluence_page_id": meta.get("confluence_page_id"),
         "source_url": meta.get("source_url"),
+        "s3_bucket": meta.get("s3_bucket"),
+        "s3_key": meta.get("s3_key"),
         "chunk_ids": chunk_ids,
         "chunk_hashes": hashes,
         "chunk_count": len(chunk_ids),
@@ -173,7 +173,25 @@ def run_pipeline():
     }
     os_client.upsert_document_metadata(meta["document_id"], doc_metadata)
 
-    logger.info(f"Ingestion complete. Indexed {len(chunks)} chunks for document {meta.get('document_id')}")
+    logger.info(
+        f"Ingestion complete. Indexed {len(chunks)} chunks for document {meta.get('document_id')}"
+    )
+
+def run_pipeline():
+    # Load environment variables
+    env = os.getenv("ENVIRONMENT", "dev")
+    env_file = f"env/.env.{env}"
+    if os.path.exists(env_file):
+        load_dotenv(env_file)
+    else:
+        load_dotenv()  # Fallback to default .env if exists
+    
+    page_id = os.getenv("CONFLUENCE_PAGE_ID")
+    
+    if not page_id:
+        raise ValueError("CONFLUENCE_PAGE_ID must be set")
+
+    ingest_page(page_id)
 
 if __name__ == "__main__":
     run_pipeline()
