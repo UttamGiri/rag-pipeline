@@ -52,6 +52,51 @@ Health check:
 curl http://localhost:8000/health
 ```
 
+## Chat Memory (Redis L2 Cache)
+
+The API now supports optional Redis-backed chat memory for prompt augmentation:
+
+- Set `REDIS_ENABLED=true` to enable.
+- Store raw turn history per `session_id`.
+- Prompt context uses:
+  - last 3 turns (raw), and
+  - summarized remainder of older history.
+
+Request example:
+
+```bash
+curl -X POST http://localhost:8000/query \
+  -H "Content-Type: application/json" \
+  -d '{"query":"What did we decide earlier?","top_k":5,"session_id":"chat-123"}'
+```
+
+Mermaid flow:
+
+```mermaid
+flowchart TD
+    A[POST /query with session_id] --> B[Fetch Redis raw history]
+    B --> C{Older history beyond last 3 turns?}
+    C -- Yes --> D[Summarize older history with Claude]
+    D --> E[Store summary in Redis]
+    C -- No --> F[Use existing/no summary]
+    E --> G[Build prompt = query + summary + last 3 turns]
+    F --> G
+    G --> H[Retrieve docs from OpenSearch]
+    H --> I[Generate answer with Claude]
+    I --> J[Append new user/assistant turn to Redis]
+```
+
+Suggested env vars:
+
+- `REDIS_ENABLED` (`true|false`)
+- `REDIS_HOST`
+- `REDIS_PORT`
+- `REDIS_DB`
+- `REDIS_PASSWORD`
+- `REDIS_HISTORY_TTL_SECONDS`
+- `CHAT_HISTORY_MAX_MESSAGES`
+- `CHAT_HISTORY_KEEP_LAST` (default 3)
+
 ## Recommended Balanced Settings for RAG
 
 These settings are used by enterprise RAG systems in Federal and banking institutions to ensure factual, deterministic, and safe responses:

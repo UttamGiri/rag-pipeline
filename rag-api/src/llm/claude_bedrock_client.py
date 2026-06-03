@@ -60,3 +60,26 @@ class ClaudeBedrockClient:
                 result += block.get("text", "")
         return result.strip()
 
+    def summarize(self, prompt: str) -> str:
+        body = {
+            "anthropic_version": "bedrock-2023-05-31",
+            "system": "You summarize chat history faithfully and concisely.",
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": prompt}]}
+            ],
+            "max_tokens": 256,
+            "temperature": 0.0,
+        }
+        resp = self.client.invoke_model(
+            modelId=self.model_id,
+            body=json.dumps(body),
+            contentType="application/json",
+            accept="application/json",
+        )
+        payload = json.loads(resp["body"].read())
+        result = ""
+        for block in payload.get("content", []):
+            if block.get("type") == "text":
+                result += block.get("text", "")
+        return result.strip()
+

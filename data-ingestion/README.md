@@ -2,17 +2,66 @@
 
 This microservice:
 
-1. Downloads a PDF from Amazon S3  
-2. Extracts text using PyPDF  
-3. Performs semantic chunking using LangChain  
-4. Redacts PII/PHI using Microsoft Presidio  
-5. Hashes raw text using SHA-256 (one-way)  
-6. Generates embeddings using Cohere `embed-english-v2` via Bedrock  
-7. Indexes redacted chunks + vectors into OpenSearch  
+1. Downloads a Confluence page by page ID
+2. Extracts plain text from Confluence storage HTML
+3. Performs semantic chunking using LangChain
+4. Redacts PII/PHI using Microsoft Presidio
+5. Hashes raw text using SHA-256 (one-way)
+6. Generates embeddings using Cohere `embed-english-v2` via Bedrock
+7. Indexes redacted chunks + vectors into OpenSearch
 
 ## Architecture
 
 This microservice implements a complete RAG (Retrieval-Augmented Generation) data ingestion pipeline with a modular, production-ready architecture. Each component is designed to be independently testable and replaceable.
+
+### Incremental Ingestion with Hash Metadata
+
+The ingestion pipeline now supports deterministic incremental updates for the same `document_id`.
+
+- A full-document hash (`document_hash`) is computed from extracted raw text.
+- A metadata index stores the current hash and chunk map for each `document_id`.
+- On re-ingest:
+  - If hash matches existing metadata: skip re-index.
+  - If hash differs: delete all old chunks for that document and write all new chunks + vectors.
+
+Mermaid flow:
+
+```mermaid
+flowchart TD
+    A[Confluence Page ID] --> B[Fetch page via Confluence REST API]
+    B --> C[Extract text from HTML]
+    C --> D[Compute document_hash]
+    D --> E{Metadata exists for document_id?}
+    E -- No --> F[Index chunks and vectors]
+    E -- Yes --> G{Hash changed?}
+    G -- No --> H[Skip write]
+    G -- Yes --> I[Delete old chunks by document_id]
+    I --> F
+    F --> J[Upsert metadata table: hash, chunk_ids, chunk_hashes, confluence_page_id]
+```
+
+Metadata mapping:
+
+```mermaid
+erDiagram
+    DOCUMENT_METADATA ||--o{ CHUNKS : maps_to
+    DOCUMENT_METADATA {
+      string document_id
+      string document_hash
+      string confluence_page_id
+      string source_url
+      string[] chunk_ids
+      string[] chunk_hashes
+      int chunk_count
+      date updated_at
+    }
+    CHUNKS {
+      string chunk_id
+      string document_id
+      string content_hash
+      vector embedding
+    }
+```
 
 ### Key Components
 
@@ -43,7 +92,7 @@ The service can be extended to detect additional entity types by modifying the `
 
 **Vector Storage**: Indexes documents in OpenSearch with:
 - KNN vector search capabilities (HNSW algorithm with cosine similarity)
-- Metadata tracking (S3 source, PII flags, content hashes)
+- Metadata tracking (Confluence source, PII flags, content hashes)
 - Support for semantic search queries
 
 ## Configuration
@@ -54,9 +103,11 @@ The service supports multiple environments (dev, staging, prod) through separate
 
 **Core Configuration:**
 - `ENVIRONMENT`: Current environment (dev/staging/prod)
-- `AWS_REGION`: AWS region for S3 and Bedrock
-- `S3_BUCKET_NAME`: S3 bucket containing PDFs
-- `S3_PDF_KEY`: S3 key/path to the PDF file
+- `AWS_REGION`: AWS region for Bedrock
+- `CONFLUENCE_BASE_URL`: Confluence site base URL (e.g., `https://your-org.atlassian.net`)
+- `CONFLUENCE_EMAIL`: Atlassian account email used for API auth
+- `CONFLUENCE_API_TOKEN`: Atlassian API token used for API auth
+- `CONFLUENCE_PAGE_ID`: Confluence page ID to ingest
 - `OPENSEARCH_ENDPOINT`: OpenSearch cluster endpoint
 - `OPENSEARCH_INDEX`: Target index name
 - `BEDROCK_COHERE_MODEL`: Cohere model ID (default: `cohere.embed-english-v2`)
@@ -67,12 +118,12 @@ The service supports multiple environments (dev, staging, prod) through separate
 **Metadata Fields (Required for Enterprise/Federal Deployments):**
 - `DEPARTMENT`: Organizational department (required) - e.g., `Engineering`, `Finance`, `HR`
 - `ROLES_ALLOWED`: Comma-separated list of allowed roles (required) - e.g., `developer,manager,analyst`
-- `DOCUMENT_ID`: Unique document identifier (optional, auto-generated from S3 key if not provided)
+- `DOCUMENT_ID`: Unique document identifier (optional, auto-generated from Confluence page ID if not provided)
 
 **Recommended Metadata Fields:**
 - `DIVISION`: Sub-unit within department - e.g., `Platform`, `Infrastructure`, `Product`
 - `TEAM`: Specific team - e.g., `DevOps`, `Security`, `API Team`
-- `DOC_TYPE`: Document type - e.g., `PDF`, `policy`, `SOP`, `manual`
+- `DOC_TYPE`: Document type - e.g., `confluence_page`, `policy`, `SOP`, `manual`
 - `TAGS`: Comma-separated tags - e.g., `onboarding,api,authentication`
 
 **Optional Metadata Fields:**

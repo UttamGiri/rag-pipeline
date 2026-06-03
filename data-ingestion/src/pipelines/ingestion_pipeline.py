@@ -1,12 +1,13 @@
 import os
 from datetime import datetime
 from dotenv import load_dotenv
-from src.loaders.s3_pdf_loader import read_pdf_from_s3
+from src.loaders.confluence_loader import read_confluence_page
 from src.chunking.semantic_chunker import semantic_split
 from src.pii.pii_presidio import PiiPresidioService
 from src.hashing.hash_utils import sha256_hash
 from src.embeddings.cohere_bedrock_embeddings import CohereBedrockEmbedder
 from src.vectorstore.opensearch_client import OpenSearchVectorStore
+from src.pipelines.incremental_utils import should_reindex
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -23,9 +24,8 @@ def _build_metadata():
     # Mandatory fields
     document_id = os.getenv("DOCUMENT_ID")
     if not document_id:
-        # Generate from S3 key if not provided
-        key = os.getenv("S3_PDF_KEY", "")
-        document_id = key.replace("/", "-").replace(".pdf", "") or "unknown-doc"
+        page_id = os.getenv("CONFLUENCE_PAGE_ID", "")
+        document_id = f"confluence-{page_id}" if page_id else "unknown-doc"
     
     department = os.getenv("DEPARTMENT", "")
     if not department:
@@ -39,9 +39,8 @@ def _build_metadata():
     meta = {
         # Document metadata (mandatory)
         "document_id": document_id,
-        "s3_bucket": os.getenv("S3_BUCKET_NAME"),
-        "s3_key": os.getenv("S3_PDF_KEY"),
-        "doc_type": os.getenv("DOC_TYPE", "PDF"),
+        "confluence_page_id": os.getenv("CONFLUENCE_PAGE_ID"),
+        "doc_type": os.getenv("DOC_TYPE", "confluence_page"),
         
         # Organizational metadata (mandatory)
         "department": department,
@@ -69,7 +68,7 @@ def _build_metadata():
     
     # Remove empty optional fields
     meta = {k: v for k, v in meta.items() if v or k in [
-        "document_id", "s3_bucket", "s3_key", "department", "roles_allowed",
+        "document_id", "confluence_page_id", "department", "roles_allowed",
         "ingestion_date", "ingested_by", "embedding_model"
     ]}
     
@@ -84,14 +83,15 @@ def run_pipeline():
     else:
         load_dotenv()  # Fallback to default .env if exists
     
-    bucket = os.getenv("S3_BUCKET_NAME")
-    key = os.getenv("S3_PDF_KEY")
+    page_id = os.getenv("CONFLUENCE_PAGE_ID")
     
-    if not bucket or not key:
-        raise ValueError("S3_BUCKET_NAME and S3_PDF_KEY must be set")
+    if not page_id:
+        raise ValueError("CONFLUENCE_PAGE_ID must be set")
 
-    logger.info(f"Starting ingestion for s3://{bucket}/{key}")
-    text = read_pdf_from_s3(bucket, key)
+    logger.info(f"Starting ingestion for Confluence page_id={page_id}")
+    page = read_confluence_page(page_id)
+    text = page["text"]
+    document_hash = sha256_hash(text)
 
     # semantic chunking
     chunks = semantic_split(text)
@@ -119,6 +119,9 @@ def run_pipeline():
 
     # Build metadata
     meta = _build_metadata()
+    meta["title"] = meta.get("title") or page.get("title", "")
+    meta["source_url"] = meta.get("source_url") or page.get("url", "")
+    meta["document_hash"] = document_hash
     
     # Create chunk metadata (chunk_index for each chunk)
     chunk_metadata_list = [
@@ -129,8 +132,24 @@ def run_pipeline():
     # index
     os_client = OpenSearchVectorStore()
     os_client.create_if_not_exists(dim)
+    os_client.create_metadata_index_if_not_exists()
+
+    existing_doc_meta = os_client.get_document_metadata(meta["document_id"])
+    if not should_reindex(existing_doc_meta, document_hash):
+        logger.info(
+            f"No change detected for document {meta['document_id']}. "
+            "Skipping delete and re-index."
+        )
+        return
+
+    if existing_doc_meta:
+        deleted = os_client.delete_chunks_by_document(meta["document_id"])
+        logger.info(
+            f"Document hash changed for {meta['document_id']}. "
+            f"Deleted {deleted} old chunks before re-index."
+        )
     
-    os_client.index_docs(
+    chunk_ids = os_client.index_docs(
         chunks=redacted,
         vectors=vectors,
         hashes=hashes,
@@ -139,6 +158,20 @@ def run_pipeline():
         meta=meta,
         chunk_metadata_list=chunk_metadata_list
     )
+
+    doc_metadata = {
+        "document_id": meta["document_id"],
+        "document_hash": document_hash,
+        "confluence_page_id": meta.get("confluence_page_id"),
+        "source_url": meta.get("source_url"),
+        "chunk_ids": chunk_ids,
+        "chunk_hashes": hashes,
+        "chunk_count": len(chunk_ids),
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+        "embedding_model": meta.get("embedding_model"),
+        "chunker_version": meta.get("chunker_version"),
+    }
+    os_client.upsert_document_metadata(meta["document_id"], doc_metadata)
 
     logger.info(f"Ingestion complete. Indexed {len(chunks)} chunks for document {meta.get('document_id')}")
 

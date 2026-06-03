@@ -7,6 +7,8 @@ from src.utils.logger import get_logger
 from src.embeddings.cohere_bedrock_embeddings import CohereBedrockEmbedder
 from src.retrieval.opensearch_retriever import OpenSearchRetriever
 from src.llm.claude_bedrock_client import ClaudeBedrockClient
+from src.history.chat_history_store import ChatHistoryStore
+from src.history.history_summarizer import HistorySummarizer
 
 logger = get_logger(__name__)
 app = FastAPI(title="RAG Query Service")
@@ -15,10 +17,13 @@ app = FastAPI(title="RAG Query Service")
 embedder = CohereBedrockEmbedder()
 retriever = OpenSearchRetriever()
 llm_client = ClaudeBedrockClient()
+history_store = ChatHistoryStore()
+history_summarizer = HistorySummarizer(llm_client)
 
 class QueryRequest(BaseModel):
     query: str
     top_k: int = 5
+    session_id: str | None = None
 
 class Source(BaseModel):
     score: float
@@ -57,8 +62,37 @@ def query_endpoint(payload: QueryRequest):
 
     contexts = [d["content"] for d in docs]
 
+    prompt_query = query
+    session_id = payload.session_id
+    if session_id and settings.redis_enabled:
+        history_parts = history_store.split_for_prompt(session_id)
+        older = history_parts["older"]
+        recent = history_parts["recent"]
+        summary = history_parts["summary"]
+
+        if older:
+            summary = history_summarizer.summarize(older, existing_summary=summary)
+            history_store.set_summary(session_id, summary)
+            history_store.compact_to_recent(session_id)
+            recent = history_store.get_messages(session_id)
+
+        if recent or summary:
+            history_text = []
+            if summary:
+                history_text.append(f"Prior summary:\n{summary}")
+            if recent:
+                recent_text = "\n".join(
+                    f"{msg.get('role', 'unknown')}: {msg.get('text', '')}"
+                    for msg in recent
+                )
+                history_text.append(f"Last 3 turns:\n{recent_text}")
+            prompt_query = f"{query}\n\nChat history context:\n" + "\n\n".join(history_text)
+
     # 3. Call Claude LLM with contexts
-    answer = llm_client.answer(query, contexts)
+    answer = llm_client.answer(prompt_query, contexts)
+
+    if session_id and settings.redis_enabled:
+        history_store.append_turn(session_id, query, answer)
 
     sources_response = [
         Source(

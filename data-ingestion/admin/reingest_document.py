@@ -15,7 +15,7 @@ from admin.delete_chunks import delete as delete_chunks
 from src.pipelines.ingestion_pipeline import run_pipeline
 from src.utils.logger import get_logger
 
-app = typer.Typer(help="Delete old chunks and re-ingest PDF")
+app = typer.Typer(help="Delete old chunks and re-ingest a Confluence page")
 logger = get_logger(__name__)
 
 def load_env():
@@ -29,9 +29,9 @@ def load_env():
         load_dotenv()  # Fallback to default .env if exists
 
 @app.command()
-def reingest(bucket: str, key: str):
+def reingest(page_id: str):
     """
-    Deletes old chunks and re-runs ingestion for one PDF.
+    Deletes old chunks and re-runs ingestion for one Confluence page.
     Uses the same chunking, embedding, PII, and hashing logic as the main pipeline.
     """
     
@@ -39,7 +39,7 @@ def reingest(bucket: str, key: str):
     
     typer.echo("\nStep 1 — Delete previous chunks:")
     try:
-        delete_chunks(bucket=bucket, key=key)
+        delete_chunks(page_id=page_id)
     except typer.Abort:
         typer.echo("Deletion cancelled. Aborting re-ingestion.")
         raise
@@ -47,19 +47,18 @@ def reingest(bucket: str, key: str):
     typer.echo("\nStep 2 — Re-ingesting document with existing ingestion pipeline...")
     
     # Set environment variables for the pipeline
-    os.environ["S3_BUCKET_NAME"] = bucket
-    os.environ["S3_PDF_KEY"] = key
+    os.environ["CONFLUENCE_PAGE_ID"] = page_id
     
-    logger.info(f"Starting re-ingestion for s3://{bucket}/{key}")
+    logger.info(f"Starting re-ingestion for Confluence page_id={page_id}")
     
     try:
         # Reuse existing ingestion pipeline
         run_pipeline()
         typer.secho("\n✓ Re-ingestion completed successfully!", fg="green")
-        logger.info(f"Successfully re-ingested s3://{bucket}/{key}")
+        logger.info(f"Successfully re-ingested Confluence page_id={page_id}")
     except Exception as e:
         typer.secho(f"\n✗ Re-ingestion failed: {str(e)}", fg="red")
-        logger.error(f"Re-ingestion failed for s3://{bucket}/{key}: {str(e)}")
+        logger.error(f"Re-ingestion failed for Confluence page_id={page_id}: {str(e)}")
         raise typer.Exit(code=1)
 
 if __name__ == "__main__":

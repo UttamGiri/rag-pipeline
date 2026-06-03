@@ -20,8 +20,8 @@ def load_env():
         load_dotenv()  # Fallback to default .env if exists
 
 @app.command()
-def delete(bucket: str, key: str):
-    """Delete all chunks for one specific S3 PDF."""
+def delete(page_id: str):
+    """Delete all chunks for one specific Confluence page ID."""
     
     load_env()
     
@@ -29,23 +29,18 @@ def delete(bucket: str, key: str):
     os_client = OpenSearchVectorStore()
     index = os_client.index
     
-    typer.echo(f"\nDeleting chunks for PDF:\nbucket={bucket}\nkey={key}\n")
+    typer.echo(f"\nDeleting chunks for Confluence page_id={page_id}\n")
     
     if not typer.confirm("Confirm delete?"):
         raise typer.Abort()
     
     query = {
         "query": {
-            "bool": {
-                "must": [
-                    {"term": {"s3_bucket": bucket}},
-                    {"term": {"s3_key": key}},
-                ]
-            }
+            "term": {"confluence_page_id": page_id}
         }
     }
     
-    logger.info(f"Deleting chunks for s3://{bucket}/{key}")
+    logger.info(f"Deleting chunks for Confluence page_id={page_id}")
     response = os_client.client.delete_by_query(index=index, body=query)
     deleted = response.get("deleted", 0)
     

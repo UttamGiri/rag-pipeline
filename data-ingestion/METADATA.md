@@ -11,10 +11,9 @@ These fields **must** be provided via environment variables:
 | `document_id` | `DOCUMENT_ID` | Unique identifier for the document | `policy-manual-v2` |
 | `department` | `DEPARTMENT` | Organizational department | `Engineering`, `Finance`, `HR` |
 | `roles_allowed` | `ROLES_ALLOWED` | Comma-separated list of allowed roles | `developer,manager,analyst` |
-| `s3_bucket` | `S3_BUCKET_NAME` | S3 bucket containing the PDF | `company-docs-staging` |
-| `s3_key` | `S3_PDF_KEY` | S3 key/path to the PDF | `policies/employee-handbook-v2.pdf` |
+| `confluence_page_id` | `CONFLUENCE_PAGE_ID` | Confluence page ID | `123456789` |
 
-**Note**: If `DOCUMENT_ID` is not provided, it will be auto-generated from the S3 key.
+**Note**: If `DOCUMENT_ID` is not provided, it will be auto-generated from the Confluence page ID.
 
 ## Recommended Fields
 
@@ -24,7 +23,7 @@ These fields are strongly recommended for better filtering and access control:
 |-------|---------------------|-------------|---------|
 | `division` | `DIVISION` | Sub-unit within department | `Platform`, `Infrastructure`, `Product` |
 | `team` | `TEAM` | Specific team | `DevOps`, `Security`, `API Team` |
-| `doc_type` | `DOC_TYPE` | Document type | `PDF`, `policy`, `SOP`, `manual` |
+| `doc_type` | `DOC_TYPE` | Document type | `confluence_page`, `policy`, `SOP`, `manual` |
 | `tags` | `TAGS` | Comma-separated tags | `onboarding,api,authentication` |
 
 ## Optional Fields
@@ -39,7 +38,7 @@ These fields enhance search, compliance, and audit capabilities:
 | `security_level` | `SECURITY_LEVEL` | Security level | `low`, `medium`, `high` |
 | `owner` | `OWNER` | Document owner | `john.doe@company.com` |
 | `data_domain` | `DATA_DOMAIN` | Data domain | `HR`, `Finance`, `Engineering`, `API` |
-| `source_url` | `SOURCE_URL` | Original source location | `https://sharepoint...` |
+| `source_url` | `SOURCE_URL` | Original source location | `https://your-org.atlassian.net/wiki/spaces/ENG/pages/123456789` |
 
 ## Auto-Generated Fields
 
@@ -64,9 +63,13 @@ These fields are automatically populated by the pipeline:
 # Mandatory
 export DEPARTMENT="Engineering"
 export ROLES_ALLOWED="developer,manager,analyst"
-export S3_BUCKET_NAME="company-docs-staging"
-export S3_PDF_KEY="policies/employee-handbook-v2.pdf"
+export CONFLUENCE_PAGE_ID="123456789"
 export DOCUMENT_ID="employee-handbook-v2"
+
+# Confluence API
+export CONFLUENCE_BASE_URL="https://your-org.atlassian.net"
+export CONFLUENCE_EMAIL="service-account@your-org.com"
+export CONFLUENCE_API_TOKEN="your-atlassian-api-token"
 
 # Recommended
 export DIVISION="Platform"

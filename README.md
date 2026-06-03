@@ -1,6 +1,6 @@
 # RAG Pipeline
 
-A production-ready Retrieval-Augmented Generation (RAG) pipeline for enterprise document processing and intelligent query answering. This system processes PDF documents, extracts and indexes content with PII/PHI redaction, and provides a secure API for semantic search and question answering.
+A production-ready Retrieval-Augmented Generation (RAG) pipeline for enterprise document processing and intelligent query answering. This system processes Confluence pages, extracts and indexes content with PII/PHI redaction, and provides a secure API for semantic search and question answering.
 
 ## Requirements & Objectives
 
@@ -26,26 +26,83 @@ A production-ready Retrieval-Augmented Generation (RAG) pipeline for enterprise 
 
 The RAG pipeline consists of three main components:
 
-1. **Data Ingestion Service**: Processes PDFs from S3, extracts text, chunks semantically, redacts PII/PHI, generates embeddings, and indexes into OpenSearch
+1. **Data Ingestion Service**: Processes Confluence pages by page ID, extracts text, chunks semantically, redacts PII/PHI, generates embeddings, and indexes into OpenSearch
 2. **RAG API Service**: FastAPI service that accepts queries, retrieves relevant documents, and generates answers using Claude via Bedrock
 3. **Integration Tests**: Comprehensive end-to-end test suite validating the entire pipeline
 
-### Architecture Flow
+### End-to-End Architecture
 
+The pipeline has two coordinated paths:
+
+- **Ingestion path**: pull a Confluence page by `page_id`, clean/chunk/redact/embed, and index into OpenSearch.
+- **Query path**: accept user query + `session_id`, retrieve context from OpenSearch, and answer with Claude.
+
+```mermaid
+flowchart LR
+    subgraph Ingestion
+        I1[Confluence page_id] --> I2[Fetch page via Confluence REST API]
+        I2 --> I3[Extract text from storage HTML]
+        I3 --> I4[Semantic chunking]
+        I4 --> I5[PII/PHI redaction]
+        I5 --> I6[Embedding generation]
+        I6 --> I7[Index chunks in OpenSearch]
+        I7 --> I8[Upsert document metadata]
+    end
+
+    subgraph Query
+        Q1[POST /query with session_id] --> Q2[Load Redis chat history]
+        Q2 --> Q3[Build prompt with summary + recent turns]
+        Q3 --> Q4[Embed query]
+        Q4 --> Q5[Vector retrieval from OpenSearch]
+        Q5 --> Q6[Claude answer generation]
+        Q6 --> Q7[Persist chat turn]
+    end
+
+    I7 -. searchable corpus .-> Q5
 ```
-PDF (S3) 
-  → Data Ingestion Service
-    → Text Extraction (PyPDF)
-    → Semantic Chunking (LangChain + Cohere)
-    → PII/PHI Redaction (Presidio)
-    → Embedding Generation (Cohere Bedrock)
-    → Vector Indexing (OpenSearch)
-  → RAG API Service
-    → Query Embedding (Cohere Bedrock)
-    → Vector Retrieval (OpenSearch)
-    → Answer Generation (Claude Bedrock)
-  → Response with Sources
+
+### Incremental Ingestion Logic
+
+Each document uses deterministic hashing to avoid unnecessary re-indexing:
+
+```mermaid
+flowchart TD
+    A[Confluence page text] --> B[Compute document_hash]
+    B --> C[Lookup metadata by document_id]
+    C --> D{Hash matches existing hash?}
+    D -- Yes --> E[Skip write]
+    D -- No --> F[Delete old chunks by document_id]
+    F --> G[Re-index chunks + vectors]
+    G --> H[Upsert metadata with new hash]
 ```
+
+### Data Stores and Responsibilities
+
+```mermaid
+flowchart LR
+    C[Confluence] --> DI[Data Ingestion]
+    DI --> OS[(OpenSearch\nchunks + vectors)]
+    DI --> MD[(Metadata Store\ndocument_hash + chunk map)]
+    U[User] --> API[RAG API]
+    API --> RH[(Redis\nchat history)]
+    API --> OS
+    API --> LLM[Claude via Bedrock]
+```
+
+### Metadata Store Recommendation
+
+For the metadata table (`document_id`, `document_hash`, `chunk_ids`, `updated_at`, lineage fields), use **relational SQL** as the default:
+
+- **Best default**: `PostgreSQL` (or `Aurora PostgreSQL` on AWS)
+- **Why**: strong consistency, transactions, indexes, easy audit queries, and predictable operations for hash-based ingestion decisions
+- **MongoDB**: good only if schema changes constantly and you need document-style flexibility more than strict integrity
+- **OpenSearch-only metadata**: possible, but weaker for transactional guarantees and operational governance
+
+Practical guidance:
+
+- If this is enterprise/compliance-oriented (your case), choose **PostgreSQL** for metadata.
+- Keep vectors/chunks in **OpenSearch**, chat turns in **Redis**, and metadata in **PostgreSQL** (polyglot persistence).
+- If you want a single-store simplification later, evaluate OpenSearch-only, but it is usually a downgrade for metadata correctness/auditing.
 
 ## Components
 
@@ -54,8 +111,8 @@ PDF (S3)
 **Purpose**: Process and index documents for retrieval
 
 **Key Features**:
-- Downloads PDFs from Amazon S3
-- Extracts text using PyPDF
+- Fetches Confluence pages using page ID + REST API
+- Extracts plain text from Confluence storage HTML
 - Performs semantic chunking using LangChain with Cohere Bedrock embeddings
 - Redacts PII/PHI using Microsoft Presidio (50+ entity types supported)
 - Hashes raw text using SHA-256 for deduplication
@@ -69,7 +126,7 @@ PDF (S3)
 - Microsoft Presidio (PII/PHI detection)
 - Cohere Bedrock (embeddings)
 - OpenSearch (vector store)
-- PyPDF (PDF extraction)
+- requests + HTML parsing (Confluence extraction)
 
 **Configuration**:
 - Environment-aware: `env/.env.dev`, `env/.env.staging`, `env/.env.prod`
@@ -228,8 +285,8 @@ rag-pipeline/
 ### In-Place Updates (Small Changes)
 
 For normal day-to-day operations:
-- **New PDFs** coming in
-- **A few PDFs** updated
+- **New Confluence pages** coming in
+- **A few Confluence pages** updated
 - **Background ingestion**
 - **Incremental changes**
 
@@ -242,7 +299,7 @@ For normal day-to-day operations:
 
 **Use admin scripts** (`data-ingestion/admin/`) for single document updates:
 ```bash
-python admin/reingest_document.py reingest --bucket mybucket --key path/doc.pdf
+python admin/reingest_document.py reingest --page-id 123456789
 ```
 
 ### Blue-Green Index (Large Changes)
@@ -265,8 +322,8 @@ For breaking changes or full rebuilds:
 
 | Scenario | Approach | Index | Downtime |
 |----------|----------|-------|----------|
-| Update 1-10 PDFs | In-place | `prod_v1` | None |
-| New PDFs (incremental) | In-place | `prod_v1` | None |
+| Update 1-10 Confluence pages | In-place | `prod_v1` | None |
+| New Confluence pages (incremental) | In-place | `prod_v1` | None |
 | Change embedding model | Blue-green | `prod_v2` + alias | None |
 | Change index mapping | Blue-green | `prod_v2` + alias | None |
 | Full corpus rebuild | Blue-green | `prod_v2` + alias | None |

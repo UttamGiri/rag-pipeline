@@ -6,6 +6,7 @@ python-dotenv
 pydantic
 pydantic-settings
 requests
+redis
 pytest
 pytest-cov
 
